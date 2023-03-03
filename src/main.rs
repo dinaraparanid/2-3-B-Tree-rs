@@ -1,4 +1,5 @@
 mod btree {
+    use std::iter::Rev;
     use std::{
         cell::RefCell,
         cmp::Ordering,
@@ -28,6 +29,7 @@ mod btree {
     pub struct BTreeIter<T: Ord + Eq + Clone> {
         cur_leaf: Option<Rc<RefCell<BTreeNode<T>>>>,
         cur_ind: usize,
+        iterations_left: usize,
     }
 
     #[derive(Debug, Default, Clone)]
@@ -62,8 +64,16 @@ mod btree {
 
     impl<T: Ord + Eq + Clone> BTreeIter<T> {
         #[inline]
-        fn new(cur_leaf: Option<Rc<RefCell<BTreeNode<T>>>>, cur_ind: usize) -> Self {
-            Self { cur_leaf, cur_ind }
+        fn new(
+            cur_leaf: Option<Rc<RefCell<BTreeNode<T>>>>,
+            cur_ind: usize,
+            iterations_left: usize,
+        ) -> Self {
+            Self {
+                cur_leaf,
+                cur_ind,
+                iterations_left,
+            }
         }
     }
 
@@ -73,6 +83,7 @@ mod btree {
             Self {
                 cur_leaf: None,
                 cur_ind: 0,
+                iterations_left: 0,
             }
         }
     }
@@ -89,23 +100,79 @@ mod btree {
                     let leaf = leaf.unwrap_as_leaf_unchecked();
                     let len = leaf.values.len();
 
-                    if self.cur_ind < len {
-                        None
+                    if self.cur_ind + 1 < len {
+                        Err(())
                     } else {
-                        Some(leaf.next_leaf.as_ref().map(|next_leaf| next_leaf.clone()))
+                        Ok(leaf.next_leaf.as_ref().map(|next_leaf| next_leaf.clone()))
                     }
                 })
-                .flatten()
                 .map(|next| {
                     let output_index = self.cur_ind;
+                    let cur_val =
+                        self.cur_leaf.as_ref().unwrap().borrow().get_values()[output_index].clone();
 
                     match next {
-                        None => self.cur_ind += 1,
-                        Some(next_leaf) => self.cur_leaf = Some(next_leaf),
+                        Err(_) => self.cur_ind += 1,
+
+                        Ok(next_leaf) => {
+                            self.cur_ind = 0;
+                            self.cur_leaf = next_leaf
+                        }
                     }
 
-                    self.cur_leaf.as_ref().unwrap().borrow().get_values()[output_index].clone()
+                    cur_val
                 })
+        }
+    }
+
+    impl<T: Ord + Eq + Clone> DoubleEndedIterator for BTreeIter<T> {
+        #[inline]
+        fn next_back(&mut self) -> Option<Self::Item> {
+            self.cur_leaf
+                .as_ref()
+                .map(|leaf| unsafe {
+                    let leaf = leaf.borrow();
+                    let leaf = leaf.unwrap_as_leaf_unchecked();
+
+                    if self.cur_ind > 0 {
+                        Err(())
+                    } else {
+                        Ok(leaf
+                            .previous_leaf
+                            .as_ref()
+                            .map(|prev_leaf| prev_leaf.upgrade().map(|prev_leaf| prev_leaf.clone()))
+                            .flatten())
+                    }
+                })
+                .map(|prev| {
+                    let output_index = self.cur_ind;
+                    let cur_val =
+                        self.cur_leaf.as_ref().unwrap().borrow().get_values()[output_index].clone();
+
+                    match prev {
+                        Err(_) => self.cur_ind -= 1,
+
+                        Ok(prev_leaf) => {
+                            self.cur_ind = prev_leaf
+                                .as_ref()
+                                .map(|leaf| unsafe {
+                                    leaf.borrow().unwrap_as_leaf_unchecked().values.len()
+                                })
+                                .unwrap_or_default();
+
+                            self.cur_leaf = prev_leaf
+                        }
+                    }
+
+                    cur_val
+                })
+        }
+    }
+
+    impl<T: Ord + Eq + Clone> ExactSizeIterator for BTreeIter<T> {
+        #[inline]
+        fn len(&self) -> usize {
+            self.iterations_left
         }
     }
 
@@ -535,8 +602,8 @@ mod btree {
                     let mut parent_subtree = parent_tree.borrow_mut();
                     let parent_subtree = parent_subtree.unwrap_as_subtree_mut_unchecked();
                     parent_subtree.children.remove(leaf_ind);
-                    parent_subtree.children.push(first_leaf);
-                    parent_subtree.children.push(second_leaf);
+                    parent_subtree.children.insert(leaf_ind, first_leaf);
+                    parent_subtree.children.insert(leaf_ind + 1, second_leaf);
                 }
 
                 self.insert_mid_key_to_parent_subtree(parent_tree, leaf_ref.values[1].clone())
@@ -627,8 +694,14 @@ mod btree {
                                 .unwrap();
 
                             parent_tree_ref.children.remove(subtree_index);
-                            parent_tree_ref.children.push(first_subtree);
-                            parent_tree_ref.children.push(second_subtree);
+
+                            parent_tree_ref
+                                .children
+                                .insert(subtree_index, first_subtree);
+
+                            parent_tree_ref
+                                .children
+                                .insert(subtree_index + 1, second_subtree);
                         }
 
                         self.insert_mid_key_to_parent_subtree(parent_tree.clone(), mid_key);
@@ -707,7 +780,7 @@ mod btree {
             self.root
                 .as_ref()
                 .map(|root_node| BTreeNode::first_leaf(root_node.clone()))
-                .map(|first_leaf| BTreeIter::new(Some(first_leaf), 0))
+                .map(|first_leaf| BTreeIter::new(Some(first_leaf), 0, self.size))
                 .unwrap_or_default()
         }
     }
@@ -736,29 +809,34 @@ mod btree {
         fn into_iter(self) -> Self::IntoIter {
             self.root
                 .map(|root_node| BTreeNode::first_leaf(root_node))
-                .map(|first_leaf| BTreeIter::new(Some(first_leaf), 0))
+                .map(|first_leaf| BTreeIter::new(Some(first_leaf), 0, self.size))
                 .unwrap_or_default()
         }
     }
 
     #[test]
     fn tree_test() {
-        let tree = BTree::from_iter(0..=100);
-        assert_eq!(tree.len(), 101);
-        assert_eq!(tree.first().map(|x| *x), Some(0));
-        assert_eq!(tree.last().map(|x| *x), Some(100));
+        let tree = BTree::from_iter(-1000..=1000);
+        assert_eq!(tree.len(), 2001);
+        assert_eq!(tree.first().map(|x| *x), Some(-1000));
+        assert_eq!(tree.last().map(|x| *x), Some(1000));
 
         assert!(tree
             .iter()
             .map(|v| *v + *v)
-            .zip((0..).map(|x| x + x))
+            .zip((-1000..).map(|x| x + x))
             .all(|(tree_elem, x)| tree_elem == x));
+
+        assert_eq!(
+            tree.iter().map(|x| *x * *x).fold(0, |acc, x| acc + x),
+            (-1000..=1000).fold(0, |acc, x| acc + x * x)
+        );
 
         assert!(tree
             .into_iter()
             .map(|v| *v * *v)
-            .zip((0..).map(|x| x * x))
-            .all(|(tree_elem, x)| tree_elem == x))
+            .zip((-1000..).map(|x| x * x))
+            .all(|(tree_elem, x)| tree_elem == x));
     }
 }
 

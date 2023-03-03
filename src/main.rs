@@ -1,5 +1,3 @@
-use crate::btree::BTree;
-
 mod btree {
     use std::{
         cell::RefCell,
@@ -12,13 +10,13 @@ mod btree {
     const MAX_KEYS: usize = 2;
     const MAX_CHILDREN: usize = 3;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     enum BTreeNode<T: Ord + Eq + Clone> {
         Leaf { leaf: BTreeLeaf<T> },
         SubTree { subtree: BTreeSubTree<T> },
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     struct BTreeLeaf<T: Ord + Eq + Clone> {
         values: Vec<Rc<T>>,
         parent: Option<Weak<RefCell<BTreeNode<T>>>>,
@@ -26,14 +24,20 @@ mod btree {
         previous_leaf: Option<Weak<RefCell<BTreeNode<T>>>>,
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Clone)]
+    pub struct BTreeIter<T: Ord + Eq + Clone> {
+        cur_leaf: Option<Rc<RefCell<BTreeNode<T>>>>,
+        cur_ind: usize,
+    }
+
+    #[derive(Debug, Default, Clone)]
     struct BTreeSubTree<T: Ord + Eq + Clone> {
         children: Vec<Rc<RefCell<BTreeNode<T>>>>,
         parent: Option<Weak<RefCell<BTreeNode<T>>>>,
         mid_keys: Vec<Rc<T>>,
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     pub struct BTree<T: Ord + Eq + Clone> {
         root: Option<Rc<RefCell<BTreeNode<T>>>>,
         size: usize,
@@ -53,6 +57,55 @@ mod btree {
                 next_leaf,
                 previous_leaf,
             }
+        }
+    }
+
+    impl<T: Ord + Eq + Clone> BTreeIter<T> {
+        #[inline]
+        fn new(cur_leaf: Option<Rc<RefCell<BTreeNode<T>>>>, cur_ind: usize) -> Self {
+            Self { cur_leaf, cur_ind }
+        }
+    }
+
+    impl<T: Ord + Eq + Clone> Default for BTreeIter<T> {
+        #[inline]
+        fn default() -> Self {
+            Self {
+                cur_leaf: None,
+                cur_ind: 0,
+            }
+        }
+    }
+
+    impl<T: Ord + Eq + Clone> Iterator for BTreeIter<T> {
+        type Item = Rc<T>;
+
+        #[inline]
+        fn next(&mut self) -> Option<Self::Item> {
+            self.cur_leaf
+                .as_ref()
+                .map(|leaf| unsafe {
+                    let leaf = leaf.borrow();
+                    let leaf = leaf.unwrap_as_leaf_unchecked();
+                    let len = leaf.values.len();
+
+                    if self.cur_ind < len {
+                        None
+                    } else {
+                        Some(leaf.next_leaf.as_ref().map(|next_leaf| next_leaf.clone()))
+                    }
+                })
+                .flatten()
+                .map(|next| {
+                    let output_index = self.cur_ind;
+
+                    match next {
+                        None => self.cur_ind += 1,
+                        Some(next_leaf) => self.cur_leaf = Some(next_leaf),
+                    }
+
+                    self.cur_leaf.as_ref().unwrap().borrow().get_values()[output_index].clone()
+                })
         }
     }
 
@@ -148,6 +201,106 @@ mod btree {
                 BTreeNode::Leaf { .. } => unreachable_unchecked(),
             }
         }
+
+        #[inline]
+        pub fn get_parent(&self) -> Option<&Weak<RefCell<BTreeNode<T>>>> {
+            match self {
+                BTreeNode::Leaf { leaf } => leaf.parent.as_ref(),
+                BTreeNode::SubTree { subtree } => subtree.parent.as_ref(),
+            }
+        }
+
+        #[inline]
+        pub fn get_parent_mut(&mut self) -> Option<&mut Weak<RefCell<BTreeNode<T>>>> {
+            match self {
+                BTreeNode::Leaf { leaf } => leaf.parent.as_mut(),
+                BTreeNode::SubTree { subtree } => subtree.parent.as_mut(),
+            }
+        }
+
+        #[inline]
+        pub fn set_parent(&mut self, new_parent: Option<Weak<RefCell<BTreeNode<T>>>>) {
+            match self {
+                BTreeNode::Leaf { leaf } => leaf.parent = new_parent,
+                BTreeNode::SubTree { subtree } => subtree.parent = new_parent,
+            }
+        }
+
+        #[inline]
+        pub fn get_values(&self) -> &Vec<Rc<T>> {
+            match self {
+                BTreeNode::Leaf { leaf } => &leaf.values,
+                BTreeNode::SubTree { subtree } => &subtree.mid_keys,
+            }
+        }
+
+        #[inline]
+        pub fn get_values_mut(&mut self) -> &mut Vec<Rc<T>> {
+            match self {
+                BTreeNode::Leaf { leaf } => &mut leaf.values,
+                BTreeNode::SubTree { subtree } => &mut subtree.mid_keys,
+            }
+        }
+
+        pub fn first_leaf(this: Rc<RefCell<Self>>) -> Rc<RefCell<Self>> {
+            match {
+                let is_leaf = this.borrow().is_leaf();
+                is_leaf
+            } {
+                true => this,
+
+                false => BTreeNode::first_leaf(unsafe {
+                    this.borrow()
+                        .unwrap_as_subtree_unchecked()
+                        .children
+                        .first()
+                        .unwrap()
+                        .clone()
+                }),
+            }
+        }
+
+        #[inline]
+        pub fn first(this: Rc<RefCell<Self>>) -> Option<Rc<T>> {
+            unsafe {
+                Self::first_leaf(this)
+                    .borrow()
+                    .unwrap_as_leaf_unchecked()
+                    .values
+                    .first()
+                    .map(|v| v.clone())
+            }
+        }
+
+        pub fn last_leaf(this: Rc<RefCell<Self>>) -> Rc<RefCell<Self>> {
+            match {
+                let is_leaf = this.borrow().is_leaf();
+                is_leaf
+            } {
+                true => this,
+
+                false => BTreeNode::last_leaf(unsafe {
+                    this.borrow()
+                        .unwrap_as_subtree_unchecked()
+                        .children
+                        .last()
+                        .unwrap()
+                        .clone()
+                }),
+            }
+        }
+
+        #[inline]
+        pub fn last(this: Rc<RefCell<Self>>) -> Option<Rc<T>> {
+            unsafe {
+                Self::last_leaf(this)
+                    .borrow()
+                    .unwrap_as_leaf_unchecked()
+                    .values
+                    .last()
+                    .map(|v| v.clone())
+            }
+        }
     }
 
     impl<T: Ord + Eq + Clone> BTree<T> {
@@ -162,6 +315,41 @@ mod btree {
         #[inline]
         pub fn len(&self) -> usize {
             self.size
+        }
+
+        #[inline]
+        pub fn is_empty(&self) -> bool {
+            self.size == 0
+        }
+
+        #[inline]
+        pub fn is_not_empty(&self) -> bool {
+            !self.is_empty()
+        }
+
+        #[inline]
+        fn new_root_after_division(
+            first_node: Rc<RefCell<BTreeNode<T>>>,
+            second_node: Rc<RefCell<BTreeNode<T>>>,
+            mid_key: Rc<T>,
+        ) -> Rc<RefCell<BTreeNode<T>>> {
+            let new_root = Rc::new(RefCell::new(BTreeNode::SubTree {
+                subtree: BTreeSubTree::new(
+                    vec![first_node.clone(), second_node.clone()],
+                    None,
+                    vec![mid_key],
+                ),
+            }));
+
+            first_node
+                .borrow_mut()
+                .set_parent(Some(Rc::downgrade(&new_root)));
+
+            second_node
+                .borrow_mut()
+                .set_parent(Some(Rc::downgrade(&new_root)));
+
+            new_root
         }
 
         #[inline]
@@ -229,27 +417,11 @@ mod btree {
                     .next_leaf = Some(second_leaf.clone());
             }
 
-            let new_root = Rc::new(RefCell::new(BTreeNode::SubTree {
-                subtree: BTreeSubTree::new(
-                    vec![first_leaf.clone(), second_leaf.clone()],
-                    None,
-                    vec![mid_key],
-                ),
-            }));
-
-            unsafe {
-                first_leaf
-                    .borrow_mut()
-                    .unwrap_as_leaf_mut_unchecked()
-                    .parent = Some(Rc::downgrade(&new_root));
-
-                second_leaf
-                    .borrow_mut()
-                    .unwrap_as_leaf_mut_unchecked()
-                    .parent = Some(Rc::downgrade(&new_root));
-            }
-
-            self.root = Some(new_root)
+            self.root = Some(Self::new_root_after_division(
+                first_leaf,
+                second_leaf,
+                mid_key,
+            ));
         }
 
         #[inline]
@@ -414,15 +586,8 @@ mod btree {
                         }));
 
                         tree.children[..2].iter_mut().for_each(|node| {
-                            match &mut *node.borrow_mut() {
-                                BTreeNode::Leaf { leaf } => {
-                                    leaf.parent = Some(Rc::downgrade(&first_subtree))
-                                }
-
-                                BTreeNode::SubTree { subtree } => {
-                                    subtree.parent = Some(Rc::downgrade(&first_subtree))
-                                }
-                            }
+                            node.borrow_mut()
+                                .set_parent(Some(Rc::downgrade(&first_subtree)))
                         });
 
                         let second_subtree = Rc::new(RefCell::new(BTreeNode::SubTree {
@@ -434,15 +599,8 @@ mod btree {
                         }));
 
                         tree.children[2..].iter_mut().for_each(|node| {
-                            match &mut *node.borrow_mut() {
-                                BTreeNode::Leaf { leaf } => {
-                                    leaf.parent = Some(Rc::downgrade(&second_subtree))
-                                }
-
-                                BTreeNode::SubTree { subtree } => {
-                                    subtree.parent = Some(Rc::downgrade(&second_subtree))
-                                }
-                            }
+                            node.borrow_mut()
+                                .set_parent(Some(Rc::downgrade(&second_subtree)))
                         });
 
                         (first_subtree, second_subtree, tree.mid_keys[1].clone())
@@ -496,17 +654,10 @@ mod btree {
                     ),
                 }));
 
-                root_tree.children[..2]
-                    .iter_mut()
-                    .for_each(|node| match &mut *node.borrow_mut() {
-                        BTreeNode::Leaf { leaf } => {
-                            leaf.parent = Some(Rc::downgrade(&first_subtree))
-                        }
-
-                        BTreeNode::SubTree { subtree } => {
-                            subtree.parent = Some(Rc::downgrade(&first_subtree))
-                        }
-                    });
+                root_tree.children[..2].iter_mut().for_each(|node| {
+                    node.borrow_mut()
+                        .set_parent(Some(Rc::downgrade(&first_subtree)))
+                });
 
                 let second_subtree = Rc::new(RefCell::new(BTreeNode::SubTree {
                     subtree: BTreeSubTree::new(
@@ -516,17 +667,10 @@ mod btree {
                     ),
                 }));
 
-                root_tree.children[2..]
-                    .iter_mut()
-                    .for_each(|node| match &mut *node.borrow_mut() {
-                        BTreeNode::Leaf { leaf } => {
-                            leaf.parent = Some(Rc::downgrade(&second_subtree))
-                        }
-
-                        BTreeNode::SubTree { subtree } => {
-                            subtree.parent = Some(Rc::downgrade(&second_subtree))
-                        }
-                    });
+                root_tree.children[2..].iter_mut().for_each(|node| {
+                    node.borrow_mut()
+                        .set_parent(Some(Rc::downgrade(&second_subtree)))
+                });
 
                 (
                     first_subtree.clone(),
@@ -535,27 +679,36 @@ mod btree {
                 )
             };
 
-            let new_root = Rc::new(RefCell::new(BTreeNode::SubTree {
-                subtree: BTreeSubTree::new(
-                    vec![first_subtree.clone(), second_subtree.clone()],
-                    None,
-                    vec![mid_key],
-                ),
-            }));
+            self.root = Some(Self::new_root_after_division(
+                first_subtree,
+                second_subtree,
+                mid_key,
+            ))
+        }
 
-            unsafe {
-                first_subtree
-                    .borrow_mut()
-                    .unwrap_as_leaf_mut_unchecked()
-                    .parent = Some(Rc::downgrade(&new_root));
+        #[inline]
+        pub fn first(&self) -> Option<Rc<T>> {
+            self.root
+                .as_ref()
+                .map(|root_node| BTreeNode::first(root_node.clone()))
+                .flatten()
+        }
 
-                second_subtree
-                    .borrow_mut()
-                    .unwrap_as_leaf_mut_unchecked()
-                    .parent = Some(Rc::downgrade(&new_root));
-            }
+        #[inline]
+        pub fn last(&self) -> Option<Rc<T>> {
+            self.root
+                .as_ref()
+                .map(|root_node| BTreeNode::last(root_node.clone()))
+                .flatten()
+        }
 
-            self.root = Some(new_root)
+        #[inline]
+        pub fn iter(&self) -> BTreeIter<T> {
+            self.root
+                .as_ref()
+                .map(|root_node| BTreeNode::first_leaf(root_node.clone()))
+                .map(|first_leaf| BTreeIter::new(Some(first_leaf), 0))
+                .unwrap_or_default()
         }
     }
 
@@ -565,10 +718,48 @@ mod btree {
             iter.into_iter().for_each(|x| self.insert(x));
         }
     }
+
+    impl<T: Ord + Eq + Clone> FromIterator<T> for BTree<T> {
+        #[inline]
+        fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+            let mut tree = BTree::new();
+            tree.extend(iter.into_iter());
+            tree
+        }
+    }
+
+    impl<T: Ord + Eq + Clone> IntoIterator for BTree<T> {
+        type Item = Rc<T>;
+        type IntoIter = BTreeIter<T>;
+
+        #[inline]
+        fn into_iter(self) -> Self::IntoIter {
+            self.root
+                .map(|root_node| BTreeNode::first_leaf(root_node))
+                .map(|first_leaf| BTreeIter::new(Some(first_leaf), 0))
+                .unwrap_or_default()
+        }
+    }
+
+    #[test]
+    fn tree_test() {
+        let tree = BTree::from_iter(0..=100);
+        assert_eq!(tree.len(), 101);
+        assert_eq!(tree.first().map(|x| *x), Some(0));
+        assert_eq!(tree.last().map(|x| *x), Some(100));
+
+        assert!(tree
+            .iter()
+            .map(|v| *v + *v)
+            .zip((0..).map(|x| x + x))
+            .all(|(tree_elem, x)| tree_elem == x));
+
+        assert!(tree
+            .into_iter()
+            .map(|v| *v * *v)
+            .zip((0..).map(|x| x * x))
+            .all(|(tree_elem, x)| tree_elem == x))
+    }
 }
 
-fn main() {
-    let mut tree = BTree::new();
-    tree.extend(0..=100);
-    assert_eq!(tree.len(), 101);
-}
+fn main() {}

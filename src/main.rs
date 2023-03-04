@@ -1,5 +1,4 @@
 mod btree {
-    use std::iter::Rev;
     use std::{
         cell::RefCell,
         cmp::Ordering,
@@ -29,7 +28,6 @@ mod btree {
     pub struct BTreeIter<T: Ord + Eq + Clone> {
         cur_leaf: Option<Rc<RefCell<BTreeNode<T>>>>,
         cur_ind: usize,
-        iterations_left: usize,
     }
 
     #[derive(Debug, Default, Clone)]
@@ -37,12 +35,12 @@ mod btree {
         children: Vec<Rc<RefCell<BTreeNode<T>>>>,
         parent: Option<Weak<RefCell<BTreeNode<T>>>>,
         mid_keys: Vec<Rc<T>>,
+        values_number: usize,
     }
 
     #[derive(Debug, Default, Clone)]
     pub struct BTree<T: Ord + Eq + Clone> {
         root: Option<Rc<RefCell<BTreeNode<T>>>>,
-        size: usize,
     }
 
     impl<T: Ord + Eq + Clone> BTreeLeaf<T> {
@@ -64,16 +62,8 @@ mod btree {
 
     impl<T: Ord + Eq + Clone> BTreeIter<T> {
         #[inline]
-        fn new(
-            cur_leaf: Option<Rc<RefCell<BTreeNode<T>>>>,
-            cur_ind: usize,
-            iterations_left: usize,
-        ) -> Self {
-            Self {
-                cur_leaf,
-                cur_ind,
-                iterations_left,
-            }
+        fn new(cur_leaf: Option<Rc<RefCell<BTreeNode<T>>>>, cur_ind: usize) -> Self {
+            Self { cur_leaf, cur_ind }
         }
     }
 
@@ -83,7 +73,6 @@ mod btree {
             Self {
                 cur_leaf: None,
                 cur_ind: 0,
-                iterations_left: 0,
             }
         }
     }
@@ -169,13 +158,6 @@ mod btree {
         }
     }
 
-    impl<T: Ord + Eq + Clone> ExactSizeIterator for BTreeIter<T> {
-        #[inline]
-        fn len(&self) -> usize {
-            self.iterations_left
-        }
-    }
-
     impl<T: Ord + Eq + Clone> BTreeSubTree<T> {
         #[inline]
         pub fn new(
@@ -183,10 +165,38 @@ mod btree {
             parent: Option<Weak<RefCell<BTreeNode<T>>>>,
             mid_keys: Vec<Rc<T>>,
         ) -> Self {
+            let values_number = children
+                .iter()
+                .map(|node| BTreeNode::values_number(node.clone()))
+                .sum();
+
             Self {
                 children,
                 parent,
                 mid_keys,
+                values_number,
+            }
+        }
+
+        #[inline]
+        pub fn get_children_index_by_value(&self, value: &T) -> usize {
+            match self.mid_keys.len() {
+                1 => match value.cmp(&*self.mid_keys[0]) {
+                    Ordering::Less => 0,
+                    _ => 1,
+                },
+
+                2 => {
+                    if *value < *self.mid_keys[0] {
+                        0
+                    } else if *value > *self.mid_keys[0] && *value < *self.mid_keys[1] {
+                        1
+                    } else {
+                        2
+                    }
+                }
+
+                _ => unreachable!(),
             }
         }
     }
@@ -368,25 +378,102 @@ mod btree {
                     .map(|v| v.clone())
             }
         }
+
+        #[inline]
+        pub fn values_number(this: Rc<RefCell<Self>>) -> usize {
+            match &*this.borrow() {
+                BTreeNode::Leaf { leaf } => leaf.values.len(),
+                BTreeNode::SubTree { subtree } => subtree.values_number,
+            }
+        }
+
+        pub fn update_parent_value_number(parent: Rc<RefCell<Self>>) {
+            unsafe {
+                parent
+                    .borrow_mut()
+                    .unwrap_as_subtree_mut_unchecked()
+                    .values_number += 1;
+            }
+
+            unsafe {
+                if let Some(next_parent) = &parent.borrow().unwrap_as_subtree_unchecked().parent {
+                    Self::update_parent_value_number(next_parent.upgrade().unwrap().clone())
+                }
+            }
+        }
+
+        pub fn get(this: Rc<RefCell<Self>>, index: usize) -> Rc<T> {
+            match {
+                let is_leaf = this.borrow().is_leaf();
+                is_leaf
+            } {
+                true => unsafe { this.borrow().unwrap_as_leaf_unchecked().values[index].clone() },
+
+                false => {
+                    let mut reduced_index = index;
+
+                    let child = unsafe {
+                        let this_ref = this.borrow();
+
+                        this_ref
+                            .unwrap_as_subtree_unchecked()
+                            .children
+                            .iter()
+                            .skip_while(|&node| {
+                                let values_number = Self::values_number(node.clone());
+
+                                if reduced_index < values_number {
+                                    false
+                                } else {
+                                    reduced_index -= values_number;
+                                    true
+                                }
+                            })
+                            .next()
+                            .unwrap()
+                            .clone()
+                    };
+
+                    Self::get(child, reduced_index)
+                }
+            }
+        }
+
+        pub fn find(this: Rc<RefCell<Self>>, value: &T) -> Rc<RefCell<Self>> {
+            match {
+                let is_leaf = this.borrow().is_leaf();
+                is_leaf
+            } {
+                true => this,
+
+                false => unsafe {
+                    let this_ref = this.borrow();
+                    let this_ref = this_ref.unwrap_as_subtree_unchecked();
+                    let child_index = this_ref.get_children_index_by_value(value);
+                    let child = this_ref.children[child_index].clone();
+                    Self::find(child, value)
+                },
+            }
+        }
     }
 
     impl<T: Ord + Eq + Clone> BTree<T> {
         #[inline]
         pub const fn new() -> Self {
-            Self {
-                root: None,
-                size: 0,
-            }
+            Self { root: None }
         }
 
         #[inline]
         pub fn len(&self) -> usize {
-            self.size
+            self.root
+                .as_ref()
+                .map(|node| BTreeNode::values_number(node.clone()))
+                .unwrap_or_default()
         }
 
         #[inline]
         pub fn is_empty(&self) -> bool {
-            self.size == 0
+            self.len() == 0
         }
 
         #[inline]
@@ -421,8 +508,6 @@ mod btree {
 
         #[inline]
         pub fn insert(&mut self, value: T) {
-            self.size += 1;
-
             match self.root.is_none() {
                 true => {
                     self.root = Some(Rc::new(RefCell::new(BTreeNode::Leaf {
@@ -494,29 +579,10 @@ mod btree {
         #[inline]
         fn insert_to_subtree(&mut self, subtree: Rc<RefCell<BTreeNode<T>>>, value: T) {
             let child_subtree_index = unsafe {
-                let subtree_ref = subtree.borrow();
-                let subtree_ref = subtree_ref.unwrap_as_subtree_unchecked();
-
-                match subtree_ref.mid_keys.len() {
-                    1 => match value.cmp(&*subtree_ref.mid_keys[0]) {
-                        Ordering::Less => 0,
-                        _ => 1,
-                    },
-
-                    2 => {
-                        if value < *subtree_ref.mid_keys[0] {
-                            0
-                        } else if value > *subtree_ref.mid_keys[0]
-                            && value < *subtree_ref.mid_keys[1]
-                        {
-                            1
-                        } else {
-                            2
-                        }
-                    }
-
-                    _ => unreachable!(),
-                }
+                subtree
+                    .borrow()
+                    .unwrap_as_subtree_unchecked()
+                    .get_children_index_by_value(&value)
             };
 
             self.insert_to_children_subtree(subtree, child_subtree_index, value)
@@ -530,8 +596,8 @@ mod btree {
             value: T,
         ) {
             let node = unsafe {
-                let subtree_borrow_ref = subtree.borrow();
-                let subtree_ref = subtree_borrow_ref.unwrap_as_subtree_unchecked();
+                let subtree_ref = subtree.borrow();
+                let subtree_ref = subtree_ref.unwrap_as_subtree_unchecked();
                 subtree_ref.children[child_subtree_index].clone()
             };
 
@@ -546,7 +612,7 @@ mod btree {
 
         #[inline]
         fn insert_to_leaf(&mut self, leaf: Rc<RefCell<BTreeNode<T>>>, leaf_ind: usize, value: T) {
-            unsafe {
+            let (parent_tree, first_leaf, second_leaf, mid_key) = unsafe {
                 let mut leaf_ref = leaf.borrow_mut();
                 let leaf_ref = leaf_ref.unwrap_as_leaf_mut_unchecked();
 
@@ -554,6 +620,8 @@ mod btree {
                 leaf_ref.values.sort();
 
                 if leaf_ref.values.len() <= MAX_KEYS {
+                    let parent_tree = leaf_ref.parent.as_ref().unwrap().upgrade().unwrap().clone();
+                    BTreeNode::update_parent_value_number(parent_tree);
                     return;
                 }
 
@@ -597,17 +665,21 @@ mod btree {
                     .next_leaf = Some(second_leaf.clone());
 
                 let parent_tree = leaf_ref.parent.as_ref().unwrap().upgrade().unwrap().clone();
+                let mid_key = leaf_ref.values[1].clone();
+                (parent_tree, first_leaf, second_leaf, mid_key)
+            };
 
-                {
-                    let mut parent_subtree = parent_tree.borrow_mut();
-                    let parent_subtree = parent_subtree.unwrap_as_subtree_mut_unchecked();
-                    parent_subtree.children.remove(leaf_ind);
-                    parent_subtree.children.insert(leaf_ind, first_leaf);
-                    parent_subtree.children.insert(leaf_ind + 1, second_leaf);
-                }
+            BTreeNode::update_parent_value_number(parent_tree.clone());
 
-                self.insert_mid_key_to_parent_subtree(parent_tree, leaf_ref.values[1].clone())
+            unsafe {
+                let mut parent_subtree = parent_tree.borrow_mut();
+                let parent_subtree = parent_subtree.unwrap_as_subtree_mut_unchecked();
+                parent_subtree.children.remove(leaf_ind);
+                parent_subtree.children.insert(leaf_ind, first_leaf);
+                parent_subtree.children.insert(leaf_ind + 1, second_leaf);
             }
+
+            self.insert_mid_key_to_parent_subtree(parent_tree, mid_key)
         }
 
         fn insert_mid_key_to_parent_subtree(
@@ -780,7 +852,42 @@ mod btree {
             self.root
                 .as_ref()
                 .map(|root_node| BTreeNode::first_leaf(root_node.clone()))
-                .map(|first_leaf| BTreeIter::new(Some(first_leaf), 0, self.size))
+                .map(|first_leaf| BTreeIter::new(Some(first_leaf), 0))
+                .unwrap_or_default()
+        }
+
+        #[inline]
+        pub unsafe fn get_unchecked(&self, index: usize) -> Rc<T> {
+            BTreeNode::get(self.root.as_ref().unwrap().clone(), index)
+        }
+
+        #[inline]
+        pub fn get(&self, index: usize) -> Option<Rc<T>> {
+            if index >= self.len() {
+                None
+            } else {
+                unsafe { Some(self.get_unchecked(index)) }
+            }
+        }
+
+        #[inline]
+        pub fn find(&self, value: &T) -> BTreeIter<T> {
+            self.root
+                .as_ref()
+                .map(|node| BTreeNode::find(node.clone(), value))
+                .map(|leaf| {
+                    let cur_ind = unsafe {
+                        leaf.borrow()
+                            .unwrap_as_leaf_unchecked()
+                            .values
+                            .iter()
+                            .position(|v| **v >= *value)
+                    };
+
+                    (leaf, cur_ind)
+                })
+                .map(|(leaf, cur_ind)| cur_ind.map(|cur_ind| BTreeIter::new(Some(leaf), cur_ind)))
+                .flatten()
                 .unwrap_or_default()
         }
     }
@@ -809,7 +916,7 @@ mod btree {
         fn into_iter(self) -> Self::IntoIter {
             self.root
                 .map(|root_node| BTreeNode::first_leaf(root_node))
-                .map(|first_leaf| BTreeIter::new(Some(first_leaf), 0, self.size))
+                .map(|first_leaf| BTreeIter::new(Some(first_leaf), 0))
                 .unwrap_or_default()
         }
     }
@@ -820,6 +927,11 @@ mod btree {
         assert_eq!(tree.len(), 2001);
         assert_eq!(tree.first().map(|x| *x), Some(-1000));
         assert_eq!(tree.last().map(|x| *x), Some(1000));
+
+        assert!((0..tree.len())
+            .map(|i| *tree.get(i).unwrap())
+            .zip(-1000..=1000)
+            .all(|(tree_elem, val)| { tree_elem == val }));
 
         assert!(tree
             .iter()
